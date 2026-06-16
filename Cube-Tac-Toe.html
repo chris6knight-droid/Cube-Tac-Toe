@@ -1380,7 +1380,7 @@ const _wn = new THREE.Vector3();
 
 function gridIndex(v) { return Math.round(v / SPACING) + 1; } // -1,0,1 -> 0,1,2
 
-function checkWin() {
+function checkWin(prefer) {
   cubeGroup.updateMatrixWorld(true);
   const lines = [
     [[0,0],[0,1],[0,2]], [[1,0],[1,1],[1,2]], [[2,0],[2,1],[2,2]], // rows
@@ -1388,6 +1388,9 @@ function checkWin() {
     [[0,0],[1,1],[2,2]], [[0,2],[1,1],[2,0]],                      // diagonals
   ];
 
+  // If a single move completes lines for both players at once, the active
+  // (moving) player wins; otherwise return whichever line exists.
+  let fallback = null;
   for (const d of DIRS) {
     // basis axes in the face plane
     let uA, vA;
@@ -1412,11 +1415,13 @@ function checkWin() {
       const [a,b,c] = ln;
       const m = grid[a[0]][a[1]];
       if (m && grid[b[0]][b[1]] === m && grid[c[0]][c[1]] === m) {
-        return { winner: m, cells: [meshGrid[a[0]][a[1]], meshGrid[b[0]][b[1]], meshGrid[c[0]][c[1]]] };
+        const found = { winner: m, cells: [meshGrid[a[0]][a[1]], meshGrid[b[0]][b[1]], meshGrid[c[0]][c[1]]] };
+        if (m === prefer) return found;   // active player wins simultaneous lines
+        if (!fallback) fallback = found;
       }
     }
   }
-  return null;
+  return fallback;
 }
 
 // ---------- Game state ----------
@@ -1472,7 +1477,7 @@ function doMove(move) {
   state.phase = 'animating';
   updateUI();
   startTurn(move, () => {
-    const result = checkWin();
+    const result = checkWin(state.player);
     if (result) {
       highlight(result.cells);
       endGame(`${playerLabel(result.winner)} wins!`);
