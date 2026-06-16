@@ -1227,6 +1227,16 @@ const DIRS = [
   { key: '-z', n: new THREE.Vector3( 0, 0,-1), rot: [0, Math.PI, 0] },
 ];
 
+// classic Rubik's color scheme (light/bright shades so X and O stay readable)
+const FACE_COLORS = {
+  '+y': 0xf7f7f7, // Up    — white
+  '-y': 0xffe34d, // Down  — yellow
+  '+x': 0xff6b6b, // Right — red
+  '-x': 0xffab57, // Left  — orange
+  '+z': 0x5bd47a, // Front — green
+  '-z': 0x5e90ff, // Back  — blue
+};
+
 // move name -> { axis, layer (grid coord), dir (+1 / -1 quarter turns) }
 const MOVES = {
   "U": {axis:'y', layer: 1, dir:-1}, "U'": {axis:'y', layer: 1, dir: 1},
@@ -1254,15 +1264,32 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x15171c);
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
-camera.position.set(4.2, 3.6, 5.2);
 
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enablePan = false;
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.minDistance = 4;
-controls.maxDistance = 12;
 controls.target.set(0, 0, 0);
+
+// Position the camera so the whole cube fits, backing off on narrow
+// (portrait phone) screens so it isn't clipped at the edges.
+const VIEW_DIR = new THREE.Vector3(4.2, 3.6, 5.2).normalize();
+function fitCamera(useViewDir) {
+  const aspect = window.innerWidth / window.innerHeight;
+  const vFov = camera.fov * Math.PI / 180;
+  const r = 2.85;                              // cube bounding radius
+  let dist = r / Math.tan(vFov / 2);           // fit vertically
+  if (aspect < 1) dist /= aspect;              // portrait: also fit horizontally
+  dist *= 1.15;                                // breathing room
+  const dir = useViewDir
+    ? VIEW_DIR.clone()
+    : camera.position.clone().sub(controls.target).normalize();
+  camera.position.copy(controls.target).addScaledVector(dir, dist);
+  controls.minDistance = dist * 0.5;
+  controls.maxDistance = dist * 2.2;
+  controls.update();
+}
+fitCamera(true);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.65));
 const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(6, 9, 7); scene.add(key);
@@ -1279,14 +1306,21 @@ function makeMarkTexture(char, color) {
   const c = document.createElement('canvas'); c.width = c.height = s;
   const ctx = c.getContext('2d');
   ctx.clearRect(0,0,s,s);
-  ctx.strokeStyle = color; ctx.lineCap = 'round'; ctx.lineWidth = 34;
-  if (char === 'X') {
-    const m = 64;
-    ctx.beginPath(); ctx.moveTo(m,m); ctx.lineTo(s-m,s-m);
-    ctx.moveTo(s-m,m); ctx.lineTo(m,s-m); ctx.stroke();
-  } else {
-    ctx.beginPath(); ctx.arc(s/2, s/2, s/2 - 70, 0, Math.PI*2); ctx.stroke();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const m = 64;
+  function path() {
+    ctx.beginPath();
+    if (char === 'X') {
+      ctx.moveTo(m,m); ctx.lineTo(s-m,s-m);
+      ctx.moveTo(s-m,m); ctx.lineTo(m,s-m);
+    } else {
+      ctx.arc(s/2, s/2, s/2 - 70, 0, Math.PI*2);
+    }
   }
+  // white halo underneath so the mark stays visible on any face color
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 54; path(); ctx.stroke();
+  // player color on top
+  ctx.strokeStyle = color; ctx.lineWidth = 32; path(); ctx.stroke();
   const tex = new THREE.CanvasTexture(c);
   tex.anisotropy = 4;
   return tex;
@@ -1319,11 +1353,12 @@ function buildCube() {
       const sign = d.key[0] === '+' ? 1 : -1;
       if (coord[axis] !== sign) continue;     // only exterior faces get stickers
 
-      const stickerMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.6, metalness: 0.0 });
+      const faceColor = FACE_COLORS[d.key];
+      const stickerMat = new THREE.MeshStandardMaterial({ color: faceColor, roughness: 0.6, metalness: 0.0 });
       const sticker = new THREE.Mesh(stickerGeo, stickerMat);
       sticker.position.copy(d.n).multiplyScalar(FACE_OFF);
       sticker.rotation.set(d.rot[0], d.rot[1], d.rot[2]);
-      sticker.userData = { mark: null, markMesh: null, baseColor: 0xf5f5f5 };
+      sticker.userData = { mark: null, markMesh: null, baseColor: faceColor };
       cubie.add(sticker);
       stickers.push(sticker);
     }
@@ -1544,6 +1579,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  fitCamera(false);
 });
 
 function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; }
