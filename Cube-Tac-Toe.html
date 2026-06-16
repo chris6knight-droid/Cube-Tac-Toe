@@ -1409,54 +1409,172 @@ function finishTurn() {
   onDone();
 }
 
-// ---------- Win detection ----------
+// ---------- Win detection & board reading ----------
 const _wp = new THREE.Vector3();
 const _wn = new THREE.Vector3();
 
 function gridIndex(v) { return Math.round(v / SPACING) + 1; } // -1,0,1 -> 0,1,2
 
-function checkWin(prefer) {
-  cubeGroup.updateMatrixWorld(true);
-  const lines = [
-    [[0,0],[0,1],[0,2]], [[1,0],[1,1],[1,2]], [[2,0],[2,1],[2,2]], // rows
-    [[0,0],[1,0],[2,0]], [[0,1],[1,1],[2,1]], [[0,2],[1,2],[2,2]], // cols
-    [[0,0],[1,1],[2,2]], [[0,2],[1,1],[2,0]],                      // diagonals
-  ];
+const LINES = [
+  [[0,0],[0,1],[0,2]], [[1,0],[1,1],[1,2]], [[2,0],[2,1],[2,2]], // rows
+  [[0,0],[1,0],[2,0]], [[0,1],[1,1],[2,1]], [[0,2],[1,2],[2,2]], // cols
+  [[0,0],[1,1],[2,2]], [[0,2],[1,1],[2,0]],                      // diagonals
+];
 
-  // If a single move completes lines for both players at once, the active
-  // (moving) player wins; otherwise return whichever line exists.
-  let fallback = null;
+// Read the six faces off the live cube: per face, a 3x3 grid of marks and a
+// matching 3x3 grid of the sticker meshes occupying each cell.
+function readFaces() {
+  cubeGroup.updateMatrixWorld(true);
+  const faces = [];
   for (const d of DIRS) {
-    // basis axes in the face plane
     let uA, vA;
     if (d.key[1] === 'y') { uA = 'x'; vA = 'z'; }
     else if (d.key[1] === 'x') { uA = 'y'; vA = 'z'; }
     else { uA = 'x'; vA = 'y'; }
 
     const grid = [[null,null,null],[null,null,null],[null,null,null]];
-    const meshGrid = [[null,null,null],[null,null,null],[null,null,null]];
-
+    const mesh = [[null,null,null],[null,null,null],[null,null,null]];
     for (const s of stickers) {
       s.getWorldDirection(_wn);                    // sticker plane normal (world)
       if (_wn.dot(d.n) < 0.9) continue;
       s.getWorldPosition(_wp);
-      const r = gridIndex(_wp[uA]);
-      const cI = gridIndex(_wp[vA]);
-      grid[r][cI] = s.userData.mark;
-      meshGrid[r][cI] = s;
+      const ri = gridIndex(_wp[uA]);
+      const ci = gridIndex(_wp[vA]);
+      grid[ri][ci] = s.userData.mark;
+      mesh[ri][ci] = s;
     }
+    faces.push({ grid, mesh });
+  }
+  return faces;
+}
 
-    for (const ln of lines) {
+function checkWin(prefer) {
+  // If a single move completes lines for both players at once, the active
+  // (moving = prefer) player wins; otherwise return whichever line exists.
+  const faces = readFaces();
+  let fallback = null;
+  for (const f of faces) {
+    for (const ln of LINES) {
       const [a,b,c] = ln;
-      const m = grid[a[0]][a[1]];
-      if (m && grid[b[0]][b[1]] === m && grid[c[0]][c[1]] === m) {
-        const found = { winner: m, cells: [meshGrid[a[0]][a[1]], meshGrid[b[0]][b[1]], meshGrid[c[0]][c[1]]] };
+      const m = f.grid[a[0]][a[1]];
+      if (m && f.grid[b[0]][b[1]] === m && f.grid[c[0]][c[1]] === m) {
+        const found = { winner: m, cells: [f.mesh[a[0]][a[1]], f.mesh[b[0]][b[1]], f.mesh[c[0]][c[1]]] };
         if (m === prefer) return found;   // active player wins simultaneous lines
         if (!fallback) fallback = found;
       }
     }
   }
   return fallback;
+}
+
+// ---------- AI opponent (plays O) ----------
+const VS_AI = true;            // single-player: the bot controls O
+const HUMAN = 'X', AI = 'O';
+const ALL_MOVES = FACE_MOVES.concat(SLICE_MOVES);
+
+function inverseMove(name) { return name.endsWith("'") ? name.slice(0, -1) : name + "'"; }
+
+// Apply a move instantly (no animation) — used to look ahead, then undo.
+function applyMoveInstant(move) {
+  const def = MOVES[move];
+  const group = new THREE.Group();
+  cubeGroup.add(group);
+  const members = cubies.filter(c => Math.round(c.position[def.axis] / SPACING) === def.layer);
+  for (const c of members) group.attach(c);
+  group.rotation[def.axis] = def.dir * HALF_PI;
+  group.updateMatrixWorld(true);
+  for (const c of members) {
+    cubeGroup.attach(c);
+    c.position.set(
+      Math.round(c.position.x / SPACING) * SPACING,
+      Math.round(c.position.y / SPACING) * SPACING,
+      Math.round(c.position.z / SPACING) * SPACING,
+    );
+  }
+  cubeGroup.remove(group);
+}
+
+// Heuristic board score from `me`'s perspective.
+function scoreFaces(faces, me, opp) {
+  let score = 0, meWin = false, oppWin = false;
+  for (const f of faces) {
+    for (const ln of LINES) {
+      let mc = 0, oc = 0;
+      for (const [r, c] of ln) { const v = f.grid[r][c]; if (v === me) mc++; else if (v === opp) oc++; }
+      if (mc === 3) meWin = true;
+      if (oc === 3) oppWin = true;
+      if (oc === 0 && mc > 0) score += (mc === 2 ? 6 : 1);
+      if (mc === 0 && oc > 0) score -= (oc === 2 ? 7 : 1);
+    }
+  }
+  if (meWin) score += 1000;
+  if (oppWin) score -= 1000;
+  return { score, meWin, oppWin };
+}
+
+// Where should O place its mark?
+function aiChoosePlacement() {
+  const faces = readFaces();
+  const empties = stickers.filter(s => !s.userData.mark);
+  let blockPick = null;
+  for (const f of faces) {
+    for (const ln of LINES) {
+      let o = 0, x = 0, gap = null;
+      for (const [r, c] of ln) { const v = f.grid[r][c]; if (v === 'O') o++; else if (v === 'X') x++; else gap = [r, c]; }
+      if (o === 2 && x === 0 && gap) return f.mesh[gap[0]][gap[1]];            // complete our own line
+      if (x === 2 && o === 0 && gap && !blockPick) blockPick = f.mesh[gap[0]][gap[1]]; // else remember a block
+    }
+  }
+  if (blockPick) return blockPick;
+  // positional: favour cells that build open O lines
+  let best = empties[0], bestScore = -Infinity;
+  for (const f of faces) {
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      const s = f.mesh[r][c];
+      if (!s || s.userData.mark) continue;
+      let sc = 0;
+      for (const ln of LINES) {
+        if (!ln.some(([lr, lc]) => lr === r && lc === c)) continue;
+        let o = 0, x = 0;
+        for (const [lr, lc] of ln) { const v = f.grid[lr][lc]; if (v === 'O') o++; else if (v === 'X') x++; }
+        if (x === 0) sc += 1 + o * 2;
+        else if (o === 0) sc += 0.5;
+      }
+      if (sc > bestScore) { bestScore = sc; best = s; }
+    }
+  }
+  return best;
+}
+
+// Which move should O make? 1-ply look-ahead on the real cube.
+function aiChooseMove() {
+  let best = ALL_MOVES[0], bestScore = -Infinity;
+  for (const move of ALL_MOVES) {
+    applyMoveInstant(move);
+    const ev = scoreFaces(readFaces(), AI, HUMAN);
+    applyMoveInstant(inverseMove(move));
+    let s = ev.score;
+    if (ev.oppWin && !ev.meWin) s -= 100000;   // never hand the win to X
+    if (s > bestScore) { bestScore = s; best = move; }
+  }
+  return best;
+}
+
+function scheduleAiTurn() {
+  if (VS_AI && state.phase === 'place' && state.player === AI) setTimeout(aiPlay, 520);
+}
+
+function aiPlay() {
+  if (state.phase !== 'place' || state.player !== AI) return;
+  const sticker = aiChoosePlacement();
+  if (!sticker) return;
+  placeMark(sticker, AI);
+  state.phase = 'move';
+  updateUI();
+  setTimeout(() => {
+    if (state.phase !== 'move' || state.player !== AI) return;
+    doMove(aiChooseMove());
+  }, 560);
 }
 
 // ---------- Game state ----------
@@ -1474,19 +1592,24 @@ function newGame() {
 }
 
 function playerLabel(p) {
-  const num = p === 'X' ? '1' : '2';
-  return `<span class="who-${p.toLowerCase()}">Player ${num} (${p})</span>`;
+  return p === 'X'
+    ? `<span class="who-x">You (X)</span>`
+    : `<span class="who-o">Bot (O)</span>`;
 }
 
 function updateUI() {
-  const moveable = state.phase === 'move';
-  document.querySelectorAll('button.move').forEach(b => b.disabled = !moveable);
+  const humanMove = state.phase === 'move' && state.player === HUMAN;
+  document.querySelectorAll('button.move').forEach(b => b.disabled = !humanMove);
+
+  const human = state.player === HUMAN;
+  let txt;
   if (state.phase === 'place')
-    statusEl.innerHTML = `${playerLabel(state.player)} — place your mark`;
+    txt = human ? `${playerLabel(HUMAN)} — place your mark` : `${playerLabel(AI)} is thinking…`;
   else if (state.phase === 'move')
-    statusEl.innerHTML = `${playerLabel(state.player)} — make your move`;
+    txt = human ? `${playerLabel(HUMAN)} — make your move` : `${playerLabel(AI)} is choosing a move…`;
   else if (state.phase === 'animating')
-    statusEl.innerHTML = `${playerLabel(state.player)} — rotating…`;
+    txt = human ? `${playerLabel(HUMAN)} — rotating…` : `${playerLabel(AI)} is rotating…`;
+  statusEl.innerHTML = txt;
 }
 
 function highlight(cells) {
@@ -1515,7 +1638,7 @@ function doMove(move) {
     const result = checkWin(state.player);
     if (result) {
       highlight(result.cells);
-      endGame(`${playerLabel(result.winner)} wins!`);
+      endGame(result.winner === HUMAN ? '🎉 You win!' : '🤖 Bot (O) wins!');
       return;
     }
     if (emptyStickerCount() === 0) {
@@ -1525,6 +1648,7 @@ function doMove(move) {
     state.player = state.player === 'X' ? 'O' : 'X';
     state.phase = 'place';
     updateUI();
+    scheduleAiTurn();
   });
 }
 
@@ -1541,7 +1665,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
   down = null;
   if (moved > 6) return;                       // treat as an orbit drag, not a click
-  if (state.phase !== 'place') return;
+  if (state.phase !== 'place' || state.player !== HUMAN) return;
 
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
