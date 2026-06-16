@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cube Tac Toe</title>
+<style>
+  :root {
+    --bg: #15171c;
+    --panel: rgba(28, 31, 38, 0.85);
+    --x: #ff4d4d;
+    --o: #4d8bff;
+    --text: #e8eaed;
+    --muted: #9aa0a8;
+    --accent: #ffcf3f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #scene { position: fixed; inset: 0; touch-action: none; }
+
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0; padding: 14px 16px;
+    display: flex; align-items: center; gap: 16px; pointer-events: none; z-index: 5;
+  }
+  #title { font-weight: 700; font-size: 18px; letter-spacing: .5px; }
+  #status {
+    background: var(--panel); padding: 8px 14px; border-radius: 999px;
+    font-size: 15px; font-weight: 600; pointer-events: none; backdrop-filter: blur(6px);
+  }
+  #status .who-x { color: var(--x); }
+  #status .who-o { color: var(--o); }
+  #newgame {
+    margin-left: auto; pointer-events: auto; cursor: pointer;
+    background: #2a2e37; color: var(--text); border: 1px solid #3a3f4a;
+    border-radius: 8px; padding: 8px 14px; font-size: 14px; font-weight: 600;
+  }
+  #newgame:hover { background: #343943; }
+
+  #controls {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 5;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 12px; background: linear-gradient(transparent, rgba(0,0,0,.35));
+  }
+  .move-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .move-row .label { align-self: center; color: var(--muted); font-size: 12px; margin-right: 4px; width: 46px; text-align: right; }
+  button.move {
+    cursor: pointer; min-width: 42px; padding: 9px 0; border-radius: 8px;
+    border: 1px solid #3a3f4a; background: #262a32; color: var(--text);
+    font-size: 14px; font-weight: 700; font-family: ui-monospace, Menlo, monospace;
+    transition: background .12s, transform .06s;
+  }
+  button.move:hover:not(:disabled) { background: #343a45; }
+  button.move:active:not(:disabled) { transform: translateY(1px); }
+  button.move:disabled { opacity: .35; cursor: not-allowed; }
+  .slice { border-color: #4a4255; background: #2e2935; }
+
+  #hint { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  #overlay {
+    position: fixed; inset: 0; z-index: 10; display: none;
+    align-items: center; justify-content: center; background: rgba(0,0,0,.55);
+  }
+  #overlay.show { display: flex; }
+  #overlay .card {
+    background: var(--panel); border: 1px solid #3a3f4a; border-radius: 16px;
+    padding: 28px 36px; text-align: center; backdrop-filter: blur(8px);
+  }
+  #overlay .result { font-size: 28px; font-weight: 800; margin-bottom: 14px; }
+  #overlay button {
+    cursor: pointer; background: var(--accent); color: #1a1a1a; border: none;
+    border-radius: 10px; padding: 11px 22px; font-size: 15px; font-weight: 700;
+  }
+</style>
+</head>
+<body>
+  <div id="scene"></div>
+
+  <div id="hud">
+    <div id="title">Cube&nbsp;Tac&nbsp;Toe</div>
+    <div id="status">Loading…</div>
+    <button id="newgame">New Game</button>
+  </div>
+
+  <div id="controls">
+    <div id="hint">Drag empty space to rotate the cube · click a white sticker to place your mark</div>
+    <div class="move-row" id="faceRow"><span class="label">Faces</span></div>
+    <div class="move-row" id="sliceRow"><span class="label">Slices</span></div>
+  </div>
+
+  <div id="overlay">
+    <div class="card">
+      <div class="result" id="resultText"></div>
+      <button id="playAgain">Play Again</button>
+    </div>
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+// ---------- Constants ----------
+const SPACING   = 1.0;          // grid spacing between cubie centers
+const CUBIE     = 0.92;         // cubie edge length
+const STICKER   = 0.78;         // sticker tile size
+const FACE_OFF  = CUBIE / 2 + 0.002;
+const TURN_MS   = 240;          // duration of a layer rotation
+const HALF_PI   = Math.PI / 2;
+
+// direction -> euler for a plane (default normal +Z) so it faces that way
+const DIRS = [
+  { key: '+x', n: new THREE.Vector3( 1, 0, 0), rot: [0,  HALF_PI, 0] },
+  { key: '-x', n: new THREE.Vector3(-1, 0, 0), rot: [0, -HALF_PI, 0] },
+  { key: '+y', n: new THREE.Vector3( 0, 1, 0), rot: [-HALF_PI, 0, 0] },
+  { key: '-y', n: new THREE.Vector3( 0,-1, 0), rot: [ HALF_PI, 0, 0] },
+  { key: '+z', n: new THREE.Vector3( 0, 0, 1), rot: [0, 0, 0] },
+  { key: '-z', n: new THREE.Vector3( 0, 0,-1), rot: [0, Math.PI, 0] },
+];
+
+// move name -> { axis, layer (grid coord), dir (+1 / -1 quarter turns) }
+const MOVES = {
+  "U": {axis:'y', layer: 1, dir:-1}, "U'": {axis:'y', layer: 1, dir: 1},
+  "D": {axis:'y', layer:-1, dir: 1}, "D'": {axis:'y', layer:-1, dir:-1},
+  "R": {axis:'x', layer: 1, dir:-1}, "R'": {axis:'x', layer: 1, dir: 1},
+  "L": {axis:'x', layer:-1, dir: 1}, "L'": {axis:'x', layer:-1, dir:-1},
+  "F": {axis:'z', layer: 1, dir:-1}, "F'": {axis:'z', layer: 1, dir: 1},
+  "B": {axis:'z', layer:-1, dir: 1}, "B'": {axis:'z', layer:-1, dir:-1},
+  // slices follow L / D / F respectively
+  "M": {axis:'x', layer: 0, dir: 1}, "M'": {axis:'x', layer: 0, dir:-1},
+  "E": {axis:'y', layer: 0, dir: 1}, "E'": {axis:'y', layer: 0, dir:-1},
+  "S": {axis:'z', layer: 0, dir:-1}, "S'": {axis:'z', layer: 0, dir: 1},
+};
+const FACE_MOVES  = ["U","U'","D","D'","L","L'","R","R'","F","F'","B","B'"];
+const SLICE_MOVES = ["M","M'","E","E'","S","S'"];
+
+// ---------- Scene ----------
+const sceneEl = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+sceneEl.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x15171c);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(4.2, 3.6, 5.2);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enablePan = false;
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 4;
+controls.maxDistance = 12;
+controls.target.set(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(6, 9, 7); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.45); fill.position.set(-6, -3, -5); scene.add(fill);
+
+const cubeGroup = new THREE.Group();
+scene.add(cubeGroup);
+
+// ---------- Materials & textures ----------
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x121214, roughness: 0.55, metalness: 0.1 });
+
+function makeMarkTexture(char, color) {
+  const s = 256;
+  const c = document.createElement('canvas'); c.width = c.height = s;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0,0,s,s);
+  ctx.strokeStyle = color; ctx.lineCap = 'round'; ctx.lineWidth = 34;
+  if (char === 'X') {
+    const m = 64;
+    ctx.beginPath(); ctx.moveTo(m,m); ctx.lineTo(s-m,s-m);
+    ctx.moveTo(s-m,m); ctx.lineTo(m,s-m); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(s/2, s/2, s/2 - 70, 0, Math.PI*2); ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  return tex;
+}
+const markTex = { X: makeMarkTexture('X', '#ff4d4d'), O: makeMarkTexture('O', '#4d8bff') };
+const stickerGeo = new THREE.PlaneGeometry(STICKER, STICKER);
+const markGeo    = new THREE.PlaneGeometry(STICKER*0.82, STICKER*0.82);
+
+// ---------- Build cube ----------
+let cubies = [];
+let stickers = [];
+
+function buildCube() {
+  for (const c of cubies) cubeGroup.remove(c);
+  cubies = []; stickers = [];
+
+  const cubieGeo = new RoundedBoxGeometry(CUBIE, CUBIE, CUBIE, 4, 0.08);
+
+  for (let x = -1; x <= 1; x++)
+  for (let y = -1; y <= 1; y++)
+  for (let z = -1; z <= 1; z++) {
+    if (x === 0 && y === 0 && z === 0) continue;
+    const cubie = new THREE.Mesh(cubieGeo, bodyMat);
+    cubie.position.set(x*SPACING, y*SPACING, z*SPACING);
+    cubeGroup.add(cubie);
+    cubies.push(cubie);
+
+    const coord = { x, y, z };
+    for (const d of DIRS) {
+      const axis = d.key[1];                 // 'x' | 'y' | 'z'
+      const sign = d.key[0] === '+' ? 1 : -1;
+      if (coord[axis] !== sign) continue;     // only exterior faces get stickers
+
+      const stickerMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.6, metalness: 0.0 });
+      const sticker = new THREE.Mesh(stickerGeo, stickerMat);
+      sticker.position.copy(d.n).multiplyScalar(FACE_OFF);
+      sticker.rotation.set(d.rot[0], d.rot[1], d.rot[2]);
+      sticker.userData = { mark: null, markMesh: null, baseColor: 0xf5f5f5 };
+      cubie.add(sticker);
+      stickers.push(sticker);
+    }
+  }
+}
+
+function placeMark(sticker, player) {
+  const mat = new THREE.MeshBasicMaterial({ map: markTex[player], transparent: true });
+  const mark = new THREE.Mesh(markGeo, mat);
+  mark.position.set(0, 0, 0.01);          // just above the sticker, local +Z is outward
+  sticker.add(mark);
+  sticker.userData.mark = player;
+  sticker.userData.markMesh = mark;
+}
+
+// ---------- Layer rotation animation ----------
+let turn = null; // { axis, target, t0, group, cubies, onDone }
+
+function startTurn(move, onDone) {
+  const def = MOVES[move];
+  const group = new THREE.Group();
+  cubeGroup.add(group);
+  const members = cubies.filter(c => Math.round(c.position[def.axis] / SPACING) === def.layer);
+  for (const c of members) group.attach(c);
+  turn = {
+    axis: def.axis,
+    target: def.dir * HALF_PI,
+    t0: performance.now(),
+    group, cubies: members, onDone,
+  };
+}
+
+function finishTurn() {
+  const { axis, target, group, cubies: members, onDone } = turn;
+  group.rotation[axis] = target;
+  group.updateMatrixWorld(true);
+  for (const c of members) {
+    cubeGroup.attach(c);
+    // snap position back to the integer grid to avoid float drift
+    c.position.set(
+      Math.round(c.position.x / SPACING) * SPACING,
+      Math.round(c.position.y / SPACING) * SPACING,
+      Math.round(c.position.z / SPACING) * SPACING,
+    );
+  }
+  cubeGroup.remove(group);
+  turn = null;
+  onDone();
+}
+
+// ---------- Win detection ----------
+const _wp = new THREE.Vector3();
+const _wn = new THREE.Vector3();
+
+function gridIndex(v) { return Math.round(v / SPACING) + 1; } // -1,0,1 -> 0,1,2
+
+function checkWin() {
+  cubeGroup.updateMatrixWorld(true);
+  const lines = [
+    [[0,0],[0,1],[0,2]], [[1,0],[1,1],[1,2]], [[2,0],[2,1],[2,2]], // rows
+    [[0,0],[1,0],[2,0]], [[0,1],[1,1],[2,1]], [[0,2],[1,2],[2,2]], // cols
+    [[0,0],[1,1],[2,2]], [[0,2],[1,1],[2,0]],                      // diagonals
+  ];
+
+  for (const d of DIRS) {
+    // basis axes in the face plane
+    let uA, vA;
+    if (d.key[1] === 'y') { uA = 'x'; vA = 'z'; }
+    else if (d.key[1] === 'x') { uA = 'y'; vA = 'z'; }
+    else { uA = 'x'; vA = 'y'; }
+
+    const grid = [[null,null,null],[null,null,null],[null,null,null]];
+    const meshGrid = [[null,null,null],[null,null,null],[null,null,null]];
+
+    for (const s of stickers) {
+      s.getWorldDirection(_wn);                    // sticker plane normal (world)
+      if (_wn.dot(d.n) < 0.9) continue;
+      s.getWorldPosition(_wp);
+      const r = gridIndex(_wp[uA]);
+      const cI = gridIndex(_wp[vA]);
+      grid[r][cI] = s.userData.mark;
+      meshGrid[r][cI] = s;
+    }
+
+    for (const ln of lines) {
+      const [a,b,c] = ln;
+      const m = grid[a[0]][a[1]];
+      if (m && grid[b[0]][b[1]] === m && grid[c[0]][c[1]] === m) {
+        return { winner: m, cells: [meshGrid[a[0]][a[1]], meshGrid[b[0]][b[1]], meshGrid[c[0]][c[1]]] };
+      }
+    }
+  }
+  return null;
+}
+
+// ---------- Game state ----------
+const statusEl = document.getElementById('status');
+const overlay  = document.getElementById('overlay');
+const resultEl = document.getElementById('resultText');
+
+let state; // { player, phase }
+
+function newGame() {
+  buildCube();
+  state = { player: 'X', phase: 'place' };
+  overlay.classList.remove('show');
+  updateUI();
+}
+
+function playerLabel(p) {
+  const num = p === 'X' ? '1' : '2';
+  return `<span class="who-${p.toLowerCase()}">Player ${num} (${p})</span>`;
+}
+
+function updateUI() {
+  const moveable = state.phase === 'move';
+  document.querySelectorAll('button.move').forEach(b => b.disabled = !moveable);
+  if (state.phase === 'place')
+    statusEl.innerHTML = `${playerLabel(state.player)} — place your mark`;
+  else if (state.phase === 'move')
+    statusEl.innerHTML = `${playerLabel(state.player)} — make your move`;
+  else if (state.phase === 'animating')
+    statusEl.innerHTML = `${playerLabel(state.player)} — rotating…`;
+}
+
+function highlight(cells) {
+  for (const s of cells) {
+    s.material.color.set(0xffcf3f);
+    s.material.emissive = new THREE.Color(0x4a3a00);
+  }
+}
+
+function emptyStickerCount() {
+  return stickers.reduce((n, s) => n + (s.userData.mark ? 0 : 1), 0);
+}
+
+function endGame(text) {
+  state.phase = 'gameover';
+  resultEl.innerHTML = text;
+  overlay.classList.add('show');
+  updateUI();
+}
+
+function doMove(move) {
+  if (state.phase !== 'move' || turn) return;
+  state.phase = 'animating';
+  updateUI();
+  startTurn(move, () => {
+    const result = checkWin();
+    if (result) {
+      highlight(result.cells);
+      endGame(`${playerLabel(result.winner)} wins!`);
+      return;
+    }
+    if (emptyStickerCount() === 0) {
+      endGame(`It's a draw!`);
+      return;
+    }
+    state.player = state.player === 'X' ? 'O' : 'X';
+    state.phase = 'place';
+    updateUI();
+  });
+}
+
+// ---------- Pointer: click sticker to place mark ----------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let down = null;
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  down = { x: e.clientX, y: e.clientY };
+});
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!down) return;
+  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+  down = null;
+  if (moved > 6) return;                       // treat as an orbit drag, not a click
+  if (state.phase !== 'place') return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(stickers, false);
+  if (!hits.length) return;
+  const sticker = hits[0].object;
+  if (sticker.userData.mark) return;           // already taken
+
+  placeMark(sticker, state.player);
+  state.phase = 'move';
+  updateUI();
+});
+
+// ---------- Build move buttons ----------
+function addButtons(rowId, names, isSlice) {
+  const row = document.getElementById(rowId);
+  for (const name of names) {
+    const b = document.createElement('button');
+    b.className = 'move' + (isSlice ? ' slice' : '');
+    b.textContent = name;
+    b.addEventListener('click', () => doMove(name));
+    row.appendChild(b);
+  }
+}
+addButtons('faceRow', FACE_MOVES, false);
+addButtons('sliceRow', SLICE_MOVES, true);
+
+document.getElementById('newgame').addEventListener('click', newGame);
+document.getElementById('playAgain').addEventListener('click', newGame);
+
+// ---------- Resize & render loop ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; }
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  if (turn) {
+    const t = Math.min(1, (performance.now() - turn.t0) / TURN_MS);
+    turn.group.rotation[turn.axis] = turn.target * easeInOut(t);
+    if (t >= 1) finishTurn();
+  }
+  renderer.render(scene, camera);
+}
+
+newGame();
+animate();
+</script>
+</body>
+</html>
